@@ -5,6 +5,13 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import mime from "mime-types";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import Redis from "ioredis";
+
+
+
+
+const publisher = new Redis('rediss://default:AVNS_S_UHSuVMWrPySBVXopU@caching-24643986-vortex121.i.aivencloud.com:28402')
+
 import dotenv from 'dotenv';
 dotenv.config({ path: '.env' });
 
@@ -16,7 +23,7 @@ const initS3Client = () => {
 	if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
 		throw new Error('AWS credentials are not properly configured');
 	}
-
+	
 	return new S3Client({
 		region: "ap-south-1",
 		credentials: {
@@ -29,6 +36,9 @@ const initS3Client = () => {
 // Get project ID from environment variable
 const PROJECT_ID = process.env.PROJECT_ID;
 
+function publishLog(log) {
+	publisher.publish(`logs:${PROJECT_ID}`, JSON.stringify({log}));
+}
 // Helper function to recursively get all files in a directory
 const getAllFiles = (dirPath) => {
 	let results = [];
@@ -55,6 +65,7 @@ const execPromise = (command) => {
 			if (code === 0) {
 				resolve(code);
 				console.log("Process exited with code " ,code);
+				
 			} else {
 				console.error(`Process exited with code ${code}`);
 				process.exit(code); // Exit with the same code as the child process
@@ -67,29 +78,31 @@ const execPromise = (command) => {
 // Main function to handle the build and file upload process
 const init = async () => {
 	console.log("Executing script.js");
+	publishLog("Build started");
+
 	const outDirPath = path.join("/home/app/output");
 
 	try {
-		// Verify S3 client initialization
+		publishLog("Initializing S3 client");
 		const s3Client = initS3Client();
 
-		// Run build process (install dependencies and build the project)
+		publishLog("Installing dependencies and building project");
 		await execPromise(`cd ${outDirPath} && npm install && npm run build`);
-		console.log("Build completed successfully 🎉");
+		publishLog("Build completed successfully 🎉");
 
 		const distFolderPath = path.join(outDirPath, "dist");
 
-		// Check if the dist directory exists
 		if (!fs.existsSync(distFolderPath)) {
+			publishLog("Error: Dist folder not found");
 			console.error("Dist folder does not exist:", distFolderPath);
-			process.exit(1); // Exit if dist folder is missing
+			process.exit(1);
 		}
 
-		console.log("Listing contents of output directory:", distFolderPath);
+		publishLog("Starting file upload to S3");
 		const distFolderContents = getAllFiles(distFolderPath);
-		console.log(distFolderContents);
+		publishLog(`Found ${distFolderContents.length} files to upload`);
 
-		// Upload each file to S3 with better error handling
+		// Upload each file to S3
 		for (const file of distFolderContents) {
 			const filePath = file;
 			if (fs.lstatSync(filePath).isDirectory()) {
@@ -97,7 +110,7 @@ const init = async () => {
 			}
 
 			const relativeFilePath = path.relative(distFolderPath, filePath);
-			console.log("Preparing to upload file", relativeFilePath);
+			publishLog(`Uploading: ${relativeFilePath}`);
 
 			const command = new PutObjectCommand({
 				Bucket: "vortex-vercel-clone",
@@ -108,15 +121,21 @@ const init = async () => {
 
 			try {
 				await s3Client.send(command);
-				console.log("Successfully uploaded", relativeFilePath);
+				publishLog(`Successfully uploaded: ${relativeFilePath}`);
 			} catch (error) {
+				publishLog(`Error uploading ${relativeFilePath}: ${error.message}`);
 				console.error(`Failed to upload ${relativeFilePath}:`, error.message);
-				throw error; // Propagate the error to stop the process
+				throw error;
 			}
 		}
 
-		console.log("Successfully uploaded all files!");
+		publishLog("🎉 All files uploaded successfully!");
+		//exit after 1 min
+		setTimeout(() => {		
+			process.exit(0);
+		}, 60000);
 	} catch (error) {
+		publishLog(`Fatal error: ${error.message}`);
 		console.error("Fatal error during build/upload process:", error);
 		process.exit(1);
 	}
